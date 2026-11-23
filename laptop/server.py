@@ -41,6 +41,7 @@ state = {
     "sonar_cm": [-1, -1, -1, -1],
     "sonar_time": None,
     "servo_deg": 90,
+    "heading_deg": -1,        # compass, from the S3 telemetry
     "ping": {"ip": None, "ok": None, "rtt_ms": None, "time": None},
     "listening": 0,              # browsers listening to the rover microphone
     "talking": False,
@@ -114,6 +115,7 @@ def sensors_json():
             "hazmat": {"label": vision.hazmat, "time": vision.hazmat_time},
             "camera": {"online": vision.online, "fps": round(vision.fps, 1)},
             "servo_deg": state["servo_deg"],
+            "heading_deg": state["heading_deg"] if state["heading_deg"] >= 0 else None,
         }
 
 
@@ -141,6 +143,8 @@ def handle_s3_line(line):
             state["sonar_time"] = now_iso()
         if len(p) >= 12:
             state["servo_deg"] = int(p[11])
+        if len(p) >= 13:
+            state["heading_deg"] = int(p[12])   # compass, -1 = no reading
     elif line.startswith("G,"):
         _, ip, ok, rtt = line.split(",")
         state["ping"] = {"ip": ip, "ok": ok == "1", "rtt_ms": int(rtt), "time": now_iso()}

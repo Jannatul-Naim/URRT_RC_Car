@@ -5,10 +5,11 @@
    What this board does:
      - Drives the 4 motors through 2x BTS7960 (IBT-2)
      - Reads the 4 HC-SR04 sonars (proximity task)
-     - Moves the camera pan servo (SG90) on GPIO 8
+     - Moves the camera pan servo (MG996R) on GPIO 8
+     - Reads the compass (QMC5883P, I2C on GPIO 39/40) for heading
      - Pings the IP address decoded from the QR code (rule 2.1.3: the ping
        must come from the rover, so the S3 sends it, not the laptop)
-     - Optional: reads the motor-bus voltage on GPIO 2 (battery + E-stop sense)
+     - Reads the motor-bus voltage on GPIO 2: no battery or E-stop OFF = ESTOP
 
    The dashboard no longer lives here. It runs on the laptop
    (laptop/server.py), which connects to this board on ws://<S3-IP>:81.
@@ -17,9 +18,10 @@
      - Left Motor Forward  : GPIO 4 (RPWM)     - Right Motor Forward : GPIO 6 (RPWM)
      - Left Motor Reverse  : GPIO 5 (LPWM)     - Right Motor Reverse : GPIO 7 (LPWM)
      - Driver Enable (EN)  : tied to each driver's own VCC (3.3 V), always enabled
-     - Pan servo signal    : GPIO 8
+     - Pan servo signal    : GPIO 8 (MG996R)
+     - Compass I2C         : SDA GPIO 39, SCL GPIO 40 (QMC5883P, 3.3 V)
      - Sonars Trig/Echo    : 10/11, 12/13, 14/16, 17/18 (Echo via 1k/1.8k divider)
-     - Motor bus sense     : GPIO 2 (optional, 100k/22k divider)
+     - Motor bus sense     : GPIO 2 (100k/22k divider, R23/R24, required)
 
    WebSocket text commands (port 81), one per message:
      D,<left -100..100>,<right -100..100>,<pwm cap 0..100>   drive
@@ -28,7 +30,8 @@
      CMD:ESTOP / CMD:RESET                                    software E-stop
      PING                                                     answers PONG
    The S3 sends back:
-     T,<lPct>,<rPct>,<lRaw>,<rRaw>,<busV>,<estop>,<s1>,<s2>,<s3>,<s4>,<servo>
+     T,<lPct>,<rPct>,<lRaw>,<rRaw>,<busV>,<estop>,<s1>,<s2>,<s3>,<s4>,<servo>,<heading>
+       heading = compass degrees 0..359, -1 when no compass is found
      L,<level>,<text>                                         log line
      G,<ip>,<ok 0/1>,<rtt ms>                                 ping result
 
@@ -38,6 +41,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <Wire.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include "lwip/inet.h"
@@ -109,8 +113,9 @@
 #define DIRECTION_DEADTIME_MS 15         // Deadtime before reversing H-bridge direction
 #define WATCHDOG_TIMEOUT_MS   450        // Coasts to stop if connection drops >450ms
 
-// CAMERA PAN SERVO (SG90). Signal wire on GPIO 8. Power it from the servo
-// buck (+5V SERVO), never from the S3's 5V pin.
+// CAMERA PAN SERVO (MG996R). Signal wire on GPIO 8. Power it from the servo
+// buck U7 (+5V SERVO), never from the S3's 5V pin: an MG996R can draw up to
+// about 2.5 A when it stalls. Use the 180-degree type, not a 360 (continuous).
 #define PIN_SERVO             8
 #define SERVO_MIN_DEG         0          // narrow these if the camera cable pulls
 #define SERVO_MAX_DEG         180
@@ -118,13 +123,25 @@
 #define SERVO_MIN_US          500        // pulse width at 0 degrees
 #define SERVO_MAX_US          2400       // pulse width at 180 degrees
 
-// MOTOR BUS VOLTAGE SENSE (optional). Set true only after R23 (100k) and
-// R24 (22k) are soldered to GPIO 2. With nothing wired, GPIO 2 reads 0 V and
-// the rover would sit in E-stop forever, so it ships switched off.
-#define USE_BUS_SENSE         false
+// MOTOR BUS VOLTAGE SENSE = HARDWARE E-STOP SENSE. R23 (100k) from the motor
+// bus and R24 (22k) to GND meet at GPIO 2. If the motor battery is unplugged
+// or the E-stop switch is OFF, the bus reads 0 V and the rover latches ESTOP.
+// R23/R24 MUST be fitted: without them GPIO 2 reads 0 V and the rover stays in
+// ESTOP. For a bench test with no divider only, set this to false.
+#define USE_BUS_SENSE         true
 #define PIN_BUS_SENSE         2
 #define BUS_DIVIDER_RATIO     (122.0f / 22.0f)   // (R23 + R24) / R24
-#define BUS_ESTOP_BELOW_V     6.0f       // below this the E-stop switch is OFF
+#define BUS_ESTOP_BELOW_V     6.0f       // below this: no battery or E-stop OFF
+
+// COMPASS (QMC5883P; the GY-271 board is sold as "HMC5883L"). VCC to the S3
+// 3V3 pin, never 5 V. Get the offsets by turning the rover through a full
+// circle with arduino/Compass_Test and copying its "offset X / Y" numbers.
+#define PIN_COMPASS_SDA       39
+#define PIN_COMPASS_SCL       40
+#define COMPASS_OFFSET_X      0          // hard-iron offset, from Compass_Test
+#define COMPASS_OFFSET_Y      0
+#define COMPASS_DECLINATION_DEG 0.0f     // your local magnetic declination, east +
+#define COMPASS_MOUNT_DEG     0.0f       // add if 0 deg is not the rover's front
 
 // =============================================================================
 // 3. LOGGING BUFFER (Streams Serial Monitor events to Dashboard Terminal)
@@ -476,7 +493,7 @@ private:
 SonarManager sonars;
 
 // =============================================================================
-// 6b. CAMERA PAN SERVO (SG90 on GPIO 8, 50 Hz LEDC PWM)
+// 6b. CAMERA PAN SERVO (MG996R on GPIO 8, 50 Hz LEDC PWM)
 // =============================================================================
 #define SERVO_LEDC_CHANNEL  4      // channels 0-3 are the motors (core 2.x only)
 #define SERVO_FREQ_HZ       50
@@ -535,6 +552,69 @@ bool busIsOff() {
   return false;
 #endif
 }
+
+// =============================================================================
+// 6c2. COMPASS (QMC5883P on I2C, SDA GPIO 39 / SCL GPIO 40)
+// =============================================================================
+class Compass {
+public:
+  void begin() {
+    Wire.begin(PIN_COMPASS_SDA, PIN_COMPASS_SCL, 100000);
+    Wire.setTimeOut(5);   // ms: a loose wire must not stall the motor loop
+    uint8_t id = 0;
+    _ok = readRegs(0x00, 1, &id) && id == 0x80;   // QMC5883P chip ID
+    if (_ok) {
+      writeReg(0x29, 0x06);   // axis sign setup (datasheet)
+      writeReg(0x0B, 0x08);   // SET/RESET on, +-8 G
+      writeReg(0x0A, 0xCD);   // normal mode, 200 Hz, OSR 8/8
+    }
+  }
+
+  void update() {
+    if (!_ok || millis() - _last < 50) return;   // 20 readings a second
+    _last = millis();
+    uint8_t d[6];
+    if (!readRegs(0x01, 6, d)) {
+      if (++_fails >= 10) _heading = -1;          // lost for half a second
+      return;
+    }
+    _fails = 0;
+    int16_t x = (int16_t)(d[0] | (d[1] << 8));
+    int16_t y = (int16_t)(d[2] | (d[3] << 8));
+    float h = atan2f((float)(y - COMPASS_OFFSET_Y), (float)(x - COMPASS_OFFSET_X)) * 180.0f / PI
+              + COMPASS_DECLINATION_DEG + COMPASS_MOUNT_DEG;
+    while (h < 0) h += 360.0f;
+    while (h >= 360.0f) h -= 360.0f;
+    _heading = (int)(h + 0.5f) % 360;
+  }
+
+  bool present() const { return _ok; }
+  int heading() const { return _heading; }   // -1 = no reading
+
+private:
+  static const uint8_t ADDR = 0x2C;
+  bool _ok = false;
+  int _heading = -1;
+  uint8_t _fails = 0;
+  unsigned long _last = 0;
+
+  bool writeReg(uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(ADDR);
+    Wire.write(reg);
+    Wire.write(val);
+    return Wire.endTransmission() == 0;
+  }
+  bool readRegs(uint8_t reg, uint8_t n, uint8_t* out) {
+    Wire.beginTransmission(ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom(ADDR, n) != n) return false;
+    for (uint8_t i = 0; i < n; i++) out[i] = Wire.read();
+    return true;
+  }
+};
+
+Compass compass;
 
 // =============================================================================
 // 6d. ICMP PING (QR task: ping the IP from the QR code, from the rover itself)
@@ -654,10 +734,10 @@ public:
 
   void sendTelemetry(int leftPct, int rightPct, int leftRaw, int rightRaw, int s1 = -1, int s2 = -1, int s3 = -1, int s4 = -1) {
     char buf[112];
-    snprintf(buf, sizeof(buf), "T,%d,%d,%d,%d,%.1f,%d,%d,%d,%d,%d,%d",
+    snprintf(buf, sizeof(buf), "T,%d,%d,%d,%d,%.1f,%d,%d,%d,%d,%d,%d,%d",
              leftPct, rightPct, leftRaw, rightRaw, busVolts,
              motors.isEmergencyStopped() ? 1 : 0,
-             s1, s2, s3, s4, panServo.angle());
+             s1, s2, s3, s4, panServo.angle(), compass.heading());
     sendText(buf);
   }
 
@@ -779,7 +859,7 @@ private:
       } else if (msg == "CMD:ESTOP") {
         motors.emergencyStop("Dashboard E-STOP");
       } else if (msg == "CMD:RESET") {
-        if (busIsOff()) roverLog("warn", "[E-STOP] Reset refused: E-stop switch is OFF (no motor power)");
+        if (busIsOff()) roverLog("warn", "[E-STOP] Reset refused: no motor battery or E-stop switch OFF");
         else motors.resetEmergencyStop();
       } else if (msg == "PING" || msg == "T") {
         sendText("PONG");
@@ -899,6 +979,7 @@ void handleStatus() {
                 ",\"left_pwm\":" + String(motors.getActualLeftPct()) +
                 ",\"right_pwm\":" + String(motors.getActualRightPct()) +
                 ",\"pwm_cap\":" + String(motors.getPwmCap()) +
+                ",\"heading\":" + String(compass.heading()) +
                 ",\"rssi\":" + String(WiFi.RSSI()) + "}";
   httpServer.sendHeader("Access-Control-Allow-Origin", "*");
   httpServer.send(200, "application/json", json);
@@ -927,10 +1008,21 @@ void setup() {
   // 2b. Camera pan servo on GPIO 8, centred
   panServo.begin();
 
+  // 2c. Compass on I2C (GPIO 39 SDA, 40 SCL)
+  compass.begin();
+
   roverLog("sys", "[BOOT] ESP32-S3 Firmware Initialized");
   roverLog("sys", "[MOTORS] BTS7960 Drivers Armed on GPIO 4, 5, 6, 7");
   roverLog("sys", "[SONAR] 4x HC-SR04 Active: S1(10,11) S2(12,13) S3(14,16) S4(17,18)");
-  roverLog("sys", "[SERVO] Pan servo on GPIO 8, centred at 90 deg");
+  roverLog("sys", "[SERVO] MG996R pan servo on GPIO 8, centred at 90 deg");
+  roverLog(compass.present() ? "sys" : "warn",
+           compass.present() ? "[COMPASS] QMC5883P found on GPIO 39/40"
+                             : "[COMPASS] Not found on GPIO 39/40 (heading = -1). Check wiring");
+#if USE_BUS_SENSE
+  roverLog("sys", "[E-STOP] Battery sense ON (GPIO 2): no battery or switch OFF = ESTOP");
+#else
+  roverLog("warn", "[E-STOP] Battery sense OFF (USE_BUS_SENSE false): bench mode only");
+#endif
 
   // 3. Connect Wi-Fi
   WiFi.mode(WIFI_STA);
@@ -1001,11 +1093,14 @@ void loop() {
   // Update Non-blocking Ultrasonic Sensors (round-robin sweep across 4 sensors)
   sonars.update();
 
+  // Compass heading (every 50 ms)
+  compass.update();
+
   // Motor bus voltage: if the E-stop switch cuts motor power, latch the E-stop
   // so the rover does not start again by itself when the switch goes back ON.
   readBusVoltage();
   if (busIsOff() && !motors.isEmergencyStopped()) {
-    motors.emergencyStop("E-stop switch OFF (motor bus < 6 V)");
+    motors.emergencyStop("No motor battery or E-stop switch OFF (motor bus < 6 V)");
   }
 
   // Report a finished QR ping to the laptop

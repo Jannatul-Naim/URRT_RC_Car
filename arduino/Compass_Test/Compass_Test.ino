@@ -4,7 +4,7 @@
 //
 // Wiring: VCC -> 3V3, GND -> GND, SDA/SCL -> pins below. Leave DRDY unconnected.
 //   ESP32 DevKit : SDA 21, SCL 22
-//   ESP32-S3     : SDA 8,  SCL 9   (spare in config_pins.h; NOT 21, that is E-stop sense)
+//   ESP32-S3     : SDA 39, SCL 40  (same as Rover_S3; GPIO 8 is the servo)
 //
 // Serial Monitor 115200. Turn the sensor slowly through a full flat circle
 // to build the hard-iron calibration. Send 'r' to reset the calibration.
@@ -13,8 +13,8 @@
 #include <math.h>
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-const int SDA_PIN = 8;
-const int SCL_PIN = 9;
+const int SDA_PIN = 39;
+const int SCL_PIN = 40;
 const char *BOARD = "ESP32-S3";
 #else
 const int SDA_PIN = 21;
