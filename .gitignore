@@ -1,0 +1,9 @@
+# Wi-Fi credentials: only the secrets.example.h templates are committed
+arduino/*/secrets.h
+
+# Claude Code local data
+.claude/
+
+# OS / editor noise
+.DS_Store
+*.swp
