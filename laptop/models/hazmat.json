@@ -1,0 +1,27 @@
+{
+  "architecture": "mobilenet_v3_small",
+  "pretrained_weights": "MobileNet_V3_Small_Weights.DEFAULT",
+  "classes": [
+    "Explosive",
+    "Flammable",
+    "Oxidising"
+  ],
+  "image_size": 128,
+  "normalization_mean": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "normalization_std": [
+    0.229,
+    0.224,
+    0.225
+  ],
+  "confidence_threshold": 0.8,
+  "validation_accuracy": 1.0,
+  "validation_loss": 0.6482529044151306,
+  "best_epoch": 1,
+  "train_source_images": 30,
+  "train_augmented_images_per_epoch": 150,
+  "validation_images": 6
+}

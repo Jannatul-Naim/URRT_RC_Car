@@ -1,0 +1,5 @@
+# Optional dependencies used only to train and export the hazmat CNN.
+torch>=2.1
+torchvision>=0.16
+onnx>=1.14
+onnxscript>=0.4

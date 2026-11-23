@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Eco Rover Traversal</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
+    <style>
+      /* Same colours as the main dashboard */
+      :root {
+        --bg: #f2f4f3; --bar: #e5eae7; --panel: #ffffff; --head: #f6f8f7; --border: #c5d1ca;
+        --divider: #dce4df; --slot: #f4f7f5; --slot-border: #c7d4cc; --cam-bg: #e9efec;
+        --ink: #0c1810; --muted: #455c4e; --dim: #6c8274;
+        --accent: #15803d; --accent-strong: #14532d; --accent-fg: #ffffff;
+        --red: #dc2626; --amber: #d97706; --dot-idle: #b8c7be;
+      }
+      html.dark {
+        --bg: #0c0c0c; --bar: #161616; --panel: #111312; --head: #161a18; --border: #26332b;
+        --divider: #1f2b24; --slot: #161b18; --slot-border: #2a3a31; --cam-bg: #070908;
+        --ink: #e8f0eb; --muted: #8aa395; --dim: #587062;
+        --accent: #22c55e; --accent-strong: #16a34a; --accent-fg: #04130a; --dot-idle: #33453a;
+      }
+      * { box-sizing: border-box; margin: 0; }
+      html, body { height: 100%; background: var(--bg); color: var(--ink); font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+      button { font-family: inherit; cursor: pointer; }
+
+      .shell { height: 100dvh; display: flex; flex-direction: column; }
+      .titlebar { height: 38px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+                  padding: 0 12px; background: var(--bar); border-bottom: 1px solid var(--border); }
+      .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+      .btn { background: var(--slot); border: 1px solid var(--slot-border); color: var(--muted); font-size: 11px; font-weight: 600; padding: 4px 10px; }
+      .btn:hover { color: var(--ink); border-color: var(--accent); }
+      a.btn { text-decoration: none; }
+      .btn.active { background: var(--accent); border-color: var(--accent-strong); color: var(--accent-fg); }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dot-idle); display: inline-block; }
+      .dot.on { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+      .dot.err { background: var(--red); }
+
+      .main { flex: 1; min-height: 0; padding: 8px; display: grid; gap: 8px;
+              grid-template-columns: minmax(0, 1.6fr) minmax(300px, 1fr); }
+      .panel { background: var(--panel); border: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+      .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px;
+              background: var(--head); border-bottom: 1px solid var(--divider); font-weight: 700; }
+      .side { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; }
+
+      /* Camera */
+      .cam { position: relative; flex: 1; min-height: 0; background: var(--cam-bg); display: flex; align-items: center; justify-content: center; }
+      .cam img { max-width: 100%; max-height: 100%; object-fit: contain; }
+      .cam .flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity 0.25s; }
+      .cam .flash.go { opacity: 0.7; transition: none; }
+      .cam-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--divider); flex-wrap: wrap; }
+
+      /* Capture */
+      .capture-btn { background: var(--accent); color: var(--accent-fg); border: 2px solid var(--accent-strong); font-size: 14px; font-weight: 800; padding: 10px 22px; }
+      .capture-btn:active { transform: translateY(1px); }
+      .capture-info { display: flex; align-items: center; gap: 10px; }
+      .thumb { width: 64px; height: 48px; object-fit: cover; border: 1px solid var(--border); background: var(--cam-bg); }
+
+      /* E-stop + mode */
+      .safety { display: flex; align-items: center; gap: 12px; padding: 10px; }
+      .estop { width: 78px; height: 78px; flex-shrink: 0; border-radius: 50%; background: var(--red); color: #fff;
+               border: 3px solid #7f1d1d; font-size: 13px; font-weight: 800; }
+      .estop.on { animation: blink 0.8s steps(2) infinite; }
+      @keyframes blink { 50% { opacity: 0.35; } }
+      .lbl { font-size: 9px; font-weight: 700; color: var(--muted); }
+      .val { font-size: 14px; font-weight: 700; }
+      .good { color: var(--accent); } .bad { color: var(--red); } .warn { color: var(--amber); }
+
+      /* Sonars */
+      .sonars { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 8px; }
+      .sonar { border: 1px solid var(--slot-border); background: var(--slot); padding: 6px 8px; }
+      .sonar .val { font-size: 20px; }
+      .sonar.caution { border-color: var(--amber); }
+      .sonar.alert { border-color: var(--red); background: color-mix(in srgb, var(--red) 10%, var(--slot)); }
+
+      /* Drive */
+      .drive { display: flex; gap: 14px; padding: 10px; align-items: center; flex-wrap: wrap; }
+      .keys { display: grid; grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(2, 46px); gap: 4px; }
+      .key { background: var(--slot); border: 1px solid var(--slot-border); color: var(--ink); font-size: 15px; font-weight: 700; touch-action: none; }
+      .key.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent-strong); }
+      .pwm { flex: 1; min-width: 140px; display: flex; flex-direction: column; gap: 6px; }
+      .pwm input { width: 100%; accent-color: var(--accent); }
+      .locked { opacity: 0.45; pointer-events: none; }
+
+      .log { height: 110px; overflow-y: auto; padding: 6px 10px; font-size: 10px; color: var(--muted); white-space: pre-wrap; }
+
+      @media (max-width: 900px) {
+        .main { grid-template-columns: 1fr; grid-auto-rows: minmax(300px, auto); overflow-y: auto; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <!-- Title bar: links to the two pages, connection, theme -->
+      <header class="titlebar">
+        <div class="row">
+          <span style="color: var(--accent); font-weight: 700;">&gt;_ rover@traversal</span>
+          <a class="btn" href="/">Main dashboard</a>
+          <span class="btn active">Traversal</span>
+        </div>
+        <div class="row">
+          <span><span id="dotS3" class="dot"></span> S3</span>
+          <span><span id="dotCam" class="dot"></span> CAM</span>
+          <span id="linkText" class="lbl">CONNECTING...</span>
+          <button id="btnTheme" class="btn">Dark Mode</button>
+        </div>
+      </header>
+
+      <main class="main">
+        <!-- LEFT: camera + capture -->
+        <section class="panel">
+          <div class="head">
+            <span>[esp32-cam · live]</span>
+            <div class="row">
+              <span id="camFps" class="lbl">-- fps</span>
+              <button id="btnPanLeft" class="btn" title="Pan left (Q)">◀ Pan</button>
+              <button id="btnPanCenter" class="btn" title="Centre (E)">90°</button>
+              <button id="btnPanRight" class="btn" title="Pan right (R)">Pan ▶</button>
+              <span id="servoVal" class="lbl">090°</span>
+            </div>
+          </div>
+          <div class="cam">
+            <img id="camImg" alt="Camera" />
+            <div id="flash" class="flash"></div>
+          </div>
+          <div class="cam-foot">
+            <button id="btnCapture" class="capture-btn" title="Save a photo (C)">📷 CAPTURE (C)</button>
+            <div class="capture-info">
+              <img id="thumb" class="thumb" alt="" />
+              <div>
+                <div class="lbl">PHOTOS SAVED FOR LABELLING</div>
+                <div id="capCount" class="val">0</div>
+                <div id="capFile" class="lbl">ImageProsseingTraining/data/unlabeled/</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- RIGHT: safety, sonars, drive, log -->
+        <div class="side">
+          <section class="panel">
+            <div class="head"><span>[safety · mode]</span><span id="modeSince" class="lbl"></span></div>
+            <div class="safety">
+              <button id="btnEstop" class="estop" title="E-stop (Space)">E-STOP</button>
+              <div style="display: flex; flex-direction: column; gap: 5px;">
+                <span class="lbl">E-STOP</span>
+                <span id="estopState" class="val good">ARMED · OK</span>
+                <button id="btnReset" class="btn">Reset E-stop</button>
+                <span class="lbl">MODE</span>
+                <div class="row">
+                  <button id="btnTeleop" class="btn active">TELEOP</button>
+                  <button id="btnAuto" class="btn">AUTO</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="head"><span>[sonars]</span><span id="sonarBadge" class="lbl good">ALL CLEAR</span></div>
+            <div class="sonars">
+              <div id="sonar0" class="sonar"><div class="lbl">FRONT CENTRE</div><span id="sv0" class="val">--</span> cm</div>
+              <div id="sonar1" class="sonar"><div class="lbl">FRONT LEFT</div><span id="sv1" class="val">--</span> cm</div>
+              <div id="sonar2" class="sonar"><div class="lbl">FRONT RIGHT</div><span id="sv2" class="val">--</span> cm</div>
+              <div id="sonar3" class="sonar"><div class="lbl">REAR</div><span id="sv3" class="val">--</span> cm</div>
+            </div>
+          </section>
+
+          <section id="drivePanel" class="panel">
+            <div class="head"><span>[drive · W A S D]</span><span id="driveText" class="lbl">IDLE</span></div>
+            <div class="drive">
+              <div class="keys">
+                <span></span><button class="key" data-key="KeyW">W</button><span></span>
+                <button class="key" data-key="KeyA">A</button>
+                <button class="key" data-key="KeyS">S</button>
+                <button class="key" data-key="KeyD">D</button>
+              </div>
+              <div class="pwm">
+                <span class="lbl">SPEED LIMIT</span>
+                <span class="val"><span id="pwmVal">50</span>%</span>
+                <input id="pwmSlider" type="range" min="0" max="100" step="5" value="50" />
+                <span class="lbl">[ and ] change it</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="head"><span>[log]</span></div>
+            <div id="log" class="log"></div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      (() => {
+        const $ = (id) => document.getElementById(id);
+        const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+        // ---------------- state
+        let ws = null;
+        let mode = 'teleop';
+        let estop = false;
+        let pwm = 50;
+        let servo = 90;
+        let servoSent = -1;
+        const keys = { KeyW: false, KeyA: false, KeyS: false, KeyD: false };
+
+        const log = (text) => {
+          const line = `[${new Date().toTimeString().slice(0, 8)}] ${text}\n`;
+          $('log').textContent += line;
+          $('log').scrollTop = $('log').scrollHeight;
+        };
+
+        // ---------------- theme (shared with the main dashboard)
+        const setTheme = (dark) => {
+          document.documentElement.classList.toggle('dark', dark);
+          $('btnTheme').textContent = dark ? 'Light Mode' : 'Dark Mode';
+          try { localStorage.setItem('rover-theme', dark ? 'dark' : 'light'); } catch {}
+        };
+        let dark = false;
+        try { dark = localStorage.getItem('rover-theme') === 'dark'; } catch {}
+        setTheme(dark);
+        $('btnTheme').onclick = () => { dark = !dark; setTheme(dark); };
+
+        // ---------------- connection to the laptop server
+        const connect = () => {
+          ws = new WebSocket(`ws://${location.host}/ws`);
+          ws.binaryType = 'arraybuffer';
+          ws.onopen = () => { $('linkText').textContent = 'ONLINE'; log('Connected to the laptop server.'); };
+          ws.onclose = () => { $('linkText').textContent = 'OFFLINE'; setTimeout(connect, 2000); };
+          ws.onmessage = (evt) => {
+            if (typeof evt.data !== 'string') return;              // audio, not used here
+            const msg = evt.data;
+            if (msg.startsWith('{')) showStatus(JSON.parse(msg));
+            else if (msg.startsWith('T,')) showTelemetry(msg.split(','));
+            else if (msg.startsWith('L,')) log(msg.split(',').slice(2).join(','));
+          };
+        };
+        const send = (text) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(text); };
+
+        // T,lPct,rPct,lRaw,rRaw,busV,estop,s1,s2,s3,s4,servo
+        function showTelemetry(p) {
+          let worst = 'good';
+          for (let i = 0; i < 4; i++) {
+            const d = parseInt(p[7 + i], 10);
+            const card = $(`sonar${i}`);
+            if (isNaN(d) || d < 0) { $(`sv${i}`).textContent = '--'; card.className = 'sonar'; continue; }
+            $(`sv${i}`).textContent = d;
+            if (d <= 20) { card.className = 'sonar alert'; worst = 'bad'; }
+            else if (d <= 50) { card.className = 'sonar caution'; if (worst === 'good') worst = 'warn'; }
+            else card.className = 'sonar';
+          }
+          $('sonarBadge').textContent = worst === 'bad' ? 'OBSTACLE < 20 CM' : worst === 'warn' ? 'CAUTION' : 'ALL CLEAR';
+          $('sonarBadge').className = `lbl ${worst}`;
+          if (p.length >= 12 && mode === 'auto') { servo = parseInt(p[11], 10) || 90; showServo(); }
+        }
+
+        function showStatus(data) {
+          if (data.type !== 'sensors') return;
+          const st = data.status, se = data.sensors;
+          mode = st.mode;
+          estop = st.estop;
+          $('btnTeleop').classList.toggle('active', mode === 'teleop');
+          $('btnAuto').classList.toggle('active', mode === 'auto');
+          $('modeSince').textContent = `mode changed ${st.mode_changed}`;
+          $('drivePanel').classList.toggle('locked', mode === 'auto');
+          $('estopState').textContent = estop ? 'E-STOP ACTIVE' : 'ARMED · OK';
+          $('estopState').className = `val ${estop ? 'bad' : 'good'}`;
+          $('btnEstop').classList.toggle('on', estop);
+          $('dotS3').className = `dot ${st.connected.s3 ? 'on' : 'err'}`;
+          $('dotCam').className = `dot ${st.connected.camera ? 'on' : 'err'}`;
+          $('camFps').textContent = `${se.camera.fps} fps`;
+        }
+
+        // ---------------- E-stop and mode
+        const doEstop = () => {
+          send('CMD:ESTOP');
+          fetch('/api/estop', { method: 'POST' }).catch(() => {});
+          log('E-STOP sent');
+        };
+        $('btnEstop').onclick = doEstop;
+        $('btnReset').onclick = () => { send('CMD:RESET'); log('E-stop reset requested'); };
+        $('btnTeleop').onclick = () => send(JSON.stringify({ type: 'mode', mode: 'teleop' }));
+        $('btnAuto').onclick = () => send(JSON.stringify({ type: 'mode', mode: 'auto' }));
+
+        // ---------------- camera pan
+        const showServo = () => { $('servoVal').textContent = `${String(Math.round(servo)).padStart(3, '0')}°`; };
+        const pan = (delta) => { servo = delta === null ? 90 : clamp(servo + delta, 0, 180); showServo(); };
+        $('btnPanLeft').onclick = () => pan(-15);
+        $('btnPanRight').onclick = () => pan(15);
+        $('btnPanCenter').onclick = () => pan(null);
+
+        // ---------------- capture a photo for labelling later
+        const capture = async () => {
+          $('flash').classList.add('go');
+          setTimeout(() => $('flash').classList.remove('go'), 60);
+          try {
+            const r = await fetch('/api/capture', { method: 'POST' });
+            const data = await r.json();
+            if (!data.ok) { log(`Capture failed: ${data.error}`); return; }
+            $('capCount').textContent = data.count;
+            $('capFile').textContent = data.file;
+            $('thumb').src = `/captures/${encodeURIComponent(data.file)}`;
+            log(`Saved ${data.file} (${data.count} photos)`);
+          } catch (e) {
+            log('Capture failed: laptop server not reachable');
+          }
+        };
+        $('btnCapture').onclick = capture;
+
+        // ---------------- driving: W A S D (keyboard or on-screen)
+        const setPwm = (v) => { pwm = clamp(Math.round(v), 0, 100); $('pwmVal').textContent = pwm; $('pwmSlider').value = pwm; };
+        $('pwmSlider').oninput = (e) => setPwm(Number(e.target.value));
+        setPwm(50);
+
+        const renderKeys = () => {
+          document.querySelectorAll('.key').forEach((k) => k.classList.toggle('on', keys[k.dataset.key]));
+          const parts = [];
+          if (keys.KeyW) parts.push('FWD'); if (keys.KeyS) parts.push('BACK');
+          if (keys.KeyA) parts.push('LEFT'); if (keys.KeyD) parts.push('RIGHT');
+          $('driveText').textContent = parts.join('·') || 'IDLE';
+        };
+        document.querySelectorAll('.key').forEach((k) => {
+          const on = (v) => (e) => { e.preventDefault(); keys[k.dataset.key] = v; renderKeys(); };
+          k.addEventListener('pointerdown', on(true));
+          k.addEventListener('pointerup', on(false));
+          k.addEventListener('pointerleave', on(false));
+          k.addEventListener('pointercancel', on(false));
+        });
+
+        window.addEventListener('keydown', (e) => {
+          if (e.code in keys) { e.preventDefault(); keys[e.code] = true; renderKeys(); }
+          else if (e.code === 'Space') { e.preventDefault(); doEstop(); }
+          else if (e.code === 'KeyC' && !e.repeat) capture();
+          else if (e.code === 'KeyQ') pan(-15);
+          else if (e.code === 'KeyR') pan(15);
+          else if (e.code === 'KeyE') pan(null);
+          else if (e.key === '[') setPwm(pwm - 5);
+          else if (e.key === ']') setPwm(pwm + 5);
+        });
+        window.addEventListener('keyup', (e) => { if (e.code in keys) { keys[e.code] = false; renderKeys(); } });
+        window.addEventListener('blur', () => { Object.keys(keys).forEach((k) => keys[k] = false); renderKeys(); });
+
+        // Every 40 ms: tank-drive mix of W/S (throttle) and A/D (steer), like the main page.
+        setInterval(() => {
+          if (mode !== 'teleop') { send('PING'); return; }
+          const throttle = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
+          const steer = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
+          const scale = Math.abs(throttle) + Math.abs(steer) > 1 ? 0.5 : 1;
+          const left = Math.round((throttle + steer) * scale * pwm);    // D turns right:
+          const right = Math.round((throttle - steer) * scale * pwm);   // left side faster
+          send(`D,${left},${right},${pwm},0`);
+          if (Math.round(servo) !== servoSent) { send(`S,${Math.round(servo)}`); servoSent = Math.round(servo); }
+        }, 40);
+
+        // ---------------- camera stream (processed by the laptop)
+        $('camImg').src = '/api/camera/stream';
+        $('camImg').onerror = () => setTimeout(() => { $('camImg').src = '/api/camera/stream?t=' + Date.now(); }, 2000);
+
+        renderKeys();
+        showServo();
+        connect();
+      })();
+    </script>
+  </body>
+</html>

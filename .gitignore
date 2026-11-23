@@ -7,3 +7,10 @@ arduino/*/secrets.h
 # OS / editor noise
 .DS_Store
 *.swp
+
+# Python
+__pycache__/
+.venv/
+
+# Raw camera captures (Capture button), labelled later
+ImageProsseingTraining/data/unlabeled/
