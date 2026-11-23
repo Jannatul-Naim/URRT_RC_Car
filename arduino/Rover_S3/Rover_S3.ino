@@ -908,6 +908,43 @@ void roverLog(const char* level, const char* msg) {
 unsigned long lastTelemTime = 0;
 unsigned long lastStatusPrintTime = 0;
 bool isApMode = false;
+volatile int wifiLastReason = 0;   // last disconnect reason from the Wi-Fi driver
+
+// Plain-words hint for the common Wi-Fi disconnect reasons
+const char* wifiReasonText(int r) {
+  switch (r) {
+    case 2: case 202: return "router refused the login (MAC filter, device limit, or restart the router)";
+    case 15: case 204: case 203: return "wrong Wi-Fi password";
+    case 201: return "network not found (name wrong, router off, or 5 GHz only)";
+    case 200: case 8: return "lost the signal";
+    default: return "see ESP-IDF wifi_err_reason_t";
+  }
+}
+
+// Called from loop(): retry the router while running the hotspot, and log
+// the moment it joins, so a slow router does not need a reboot.
+void wifiMaintain() {
+  static bool wasConnected = false;
+  static unsigned long lastTry = 0;
+  static int loggedReason = 0;
+  bool connected = WiFi.status() == WL_CONNECTED;
+  if (connected && !wasConnected) {
+    roverLog("sys", String("[WIFI] Joined \"" + String(WIFI_SSID) + "\": " + WiFi.localIP().toString() +
+                           (isApMode ? " (hotspot still on)" : "")).c_str());
+  }
+  if (!connected && wasConnected) roverLog("warn", "[WIFI] Lost the router, retrying");
+  wasConnected = connected;
+  if (!connected && wifiLastReason != loggedReason) {
+    loggedReason = wifiLastReason;
+    char buf[128];
+    snprintf(buf, sizeof(buf), "[WIFI] Cannot join \"%s\": reason %d, %s", WIFI_SSID, loggedReason, wifiReasonText(loggedReason));
+    roverLog("warn", buf);
+  }
+  if (!connected && millis() - lastTry > 30000) {   // try the router again every 30 s
+    lastTry = millis();
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  }
+}
 
 void handleRoot() {
   httpServer.sendHeader("Connection", "close");
@@ -1025,8 +1062,11 @@ void setup() {
 #endif
 
   // 3. Connect Wi-Fi
+  WiFi.onEvent([](WiFiEvent_t e, WiFiEventInfo_t info) { wifiLastReason = info.wifi_sta_disconnected.reason; },
+               ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
 #if USE_STATIC_IP
   WiFi.config(IPAddress(STATIC_IP), IPAddress(STATIC_GATEWAY), IPAddress(STATIC_SUBNET), IPAddress(STATIC_GATEWAY));
 #endif
@@ -1047,11 +1087,15 @@ void setup() {
     roverLog("sys", String("[WIFI] Rover IP: " + WiFi.localIP().toString()).c_str());
   } else {
     isApMode = true;
-    WiFi.mode(WIFI_AP);
+    char why[128];
+    snprintf(why, sizeof(why), "[WIFI] Cannot join \"%s\": reason %d, %s", WIFI_SSID, wifiLastReason, wifiReasonText(wifiLastReason));
+    roverLog("warn", why);
+    WiFi.mode(WIFI_AP_STA);            // hotspot on, and keep trying the router
     IPAddress apIP(AP_IP);
     WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
     WiFi.softAP(AP_SSID, AP_PASSWORD);
-    roverLog("warn", String("[WIFI] SoftAP Active: \"" + String(AP_SSID) + "\" @ " + WiFi.softAPIP().toString()).c_str());
+    roverLog("warn", String("[WIFI] SoftAP Active: \"" + String(AP_SSID) + "\" @ " + WiFi.softAPIP().toString() +
+                            ", retrying the router every 30 s").c_str());
   }
 
   // 3. Start mDNS (http://rover.local)
@@ -1092,6 +1136,9 @@ void loop() {
 
   // Update Non-blocking Ultrasonic Sensors (round-robin sweep across 4 sensors)
   sonars.update();
+
+  // Wi-Fi: retry the router in the background, log when it joins
+  wifiMaintain();
 
   // Compass heading (every 50 ms)
   compass.update();
