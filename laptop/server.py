@@ -12,6 +12,10 @@ Who does what:
 Rulebook interface (Software & Autonomous rulebook, Table 6):
   GET /api/status  GET /api/sensors  POST /api/mode  POST /api/drive
   POST /api/estop  POST /api/reset   GET /api/camera/stream   WS /ws
+
+E-stop: ON while the S3, the camera and the audio board are all offline. It stays
+on after a board comes back until RESET. The S3 also latches it on its own when
+the motor battery is unplugged or the E-stop switch is OFF.
 """
 import asyncio
 import json
@@ -119,13 +123,38 @@ def sensors_json():
         }
 
 
+def any_board_online():
+    return state["s3_online"] or vision.online or state["audio_online"]
+
+
 async def set_estop(on):
+    """Returns False when a RESET is refused."""
     if on:
         state["estop"] = True
         state["estop_time"] = now_iso()
         await send_s3("CMD:ESTOP")
-    else:
+        return True
+    if not any_board_online():
+        print("[E-STOP] reset refused: no board online (S3, camera, audio)")
+        await broadcast_text("L,warn,[E-STOP] Reset refused: no board online (S3, camera, audio)")
+        return False
+    if state["s3_online"]:
         await send_s3("CMD:RESET")     # the S3 confirms in its telemetry
+    else:
+        state["estop"] = False         # no S3 to hold it; it gets CMD:ESTOP again if needed
+    return True
+
+
+async def board_watch():
+    """E-stop rule: with the S3, the camera and the audio board all offline the
+    system is in E-stop. It stays latched when a board comes back, until RESET."""
+    while True:
+        if not any_board_online() and not state["estop"]:
+            state["estop"] = True
+            state["estop_time"] = now_iso()
+            print("[E-STOP] no board online (S3, camera, audio): E-stop ON until RESET")
+            await broadcast_text("L,warn,[E-STOP] No board online: E-stop ON until RESET")
+        await asyncio.sleep(0.2)
 
 
 # ------------------------------------------------------------------ S3 link
@@ -406,7 +435,8 @@ async def api_estop(request):
 
 
 async def api_reset(request):
-    await set_estop(False)
+    if not await set_estop(False):
+        return web.json_response({"ok": False, "error": "no board online (S3, camera, audio)"}, status=409)
     return web.json_response({"ok": True, "note": "check /api/status: the S3 refuses reset while the E-stop switch is OFF"})
 
 
@@ -463,7 +493,7 @@ async def traversal(request):
 async def start_background(app):
     vision.start()
     app["tasks"] = [asyncio.create_task(s3_link()), asyncio.create_task(audio_link()),
-                    asyncio.create_task(sensor_loop())]
+                    asyncio.create_task(sensor_loop()), asyncio.create_task(board_watch())]
 
 
 def main():
